@@ -1,131 +1,452 @@
-# BTO Management System
+# BTO Management System - Technical Documentation
 
-A comprehensive, command-line based application for managing Singapore's Build-To-Order (BTO) housing projects. This system is designed to serve multiple user roles including Applicants, HDB Officers, and HDB Managers, providing a centralized platform for all BTO-related activities.
+![Java](https://img.shields.io/badge/Java-SE%208+-orange?style=for-the-badge&logo=openjdk&logoColor=white)
+![Architecture](https://img.shields.io/badge/Architecture-ECB-blue?style=for-the-badge)
+![Pattern](https://img.shields.io/badge/Pattern-Two--Pass%20Hydration-blueviolet?style=for-the-badge)
+![Persistence](https://img.shields.io/badge/Persistence-In--Memory%20Graph-green?style=for-the-badge)
 
-This project was individually developed as a requirement for the SC2002 Object-Oriented Design & Programming course at Nanyang Technological University.
+> **A Console-Based HDB Build-To-Order Management System with Two-Phase Reference Resolution**
 
+**File-persisted application demonstrating Entity-Control-Boundary architecture, role-based state machines, and in-memory relational graph construction from CSV.**
+
+This project simulates the end-to-end workflow of Singapore’s BTO housing process, modelling applicants, officers, and managers under real-world policy constraints. The system emphasises architectural clarity over external dependencies, demonstrating how complex relational state can be managed in-memory using structured design patterns.
+
+---
+
+## 📖 Table of Contents
+
+- [✨ Core Engineering Contributions](#-core-engineering-contributions)
+- [🏗️ Architecture: Entity-Control-Boundary](#️-architecture-entity-control-boundary)
+- [💾 Two-Pass Hydration Model](#-two-pass-hydration-model)
+- [🔄 State Machines](#-state-machines)
+- [👥 Authority Model](#-authority-model)
+- [🛠️ Tech Stack](#️-tech-stack)
+- [🧱 Design Patterns](#-design-patterns)
+- [💻 How to Run](#-how-to-run)
+- [🧾 License](#-license)
+- [📬 Contact](#-contact)
+
+---
+
+## ✨ Core Engineering Contributions
+
+### 1. Entity-Control-Boundary (ECB) Layering
+
+Clear separation of responsibilities across packages:
+
+- **Boundary**: HTTP-like request/response via console I/O
+- **Control**: Business logic and role-based data access
+- **Entity**: Domain models with state machines
+
+**Constraint**: Domain entities have zero dependencies on Control or Boundary layers.
+
+### 2. Two-Pass In-Memory Relational Graph
+
+CSV files store only IDs; object references constructed in two phases:
+
+**Phase 1 - Entity Hydration**: Load all entities with primitive fields only  
+**Phase 2 - Reference Resolution**: Re-parse files to link objects via ID lookups
+
+**Result**: In-memory object graph with bidirectional navigation.
+
+---
+
+## 🏗️ Architecture: Entity-Control-Boundary
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ BOUNDARY LAYER                                              │
+│ • userinterface/ - Console menu navigation                  │
+│ • display/       - Output formatting (no business logic)    │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ CONTROL LAYER                                               │
+│ • userctrl/      - Role-specific business logic             │
+│ • databasemgr/   - Filtered queries (role-based visibility) │
+│ • reader/writer/ - Persistence orchestration                │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ ENTITY LAYER                                                │
+│ • user/          - User hierarchy with state machines       │
+│ • project/       - Project entities with lifecycle          │
+│ • application/   - Application types with FSM               │
+│ • enquiry/       - Enquiry domain model                     │
+│ • database/      - Generic in-memory repository             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+<details>
+<summary><h3 style='display:inline'>🔍 Layer Enforcement<h3></summary>
+
+**Entity Layer Isolation**:
+
+- No imports from `userctrl`, `databasemgr`, `userinterface`, `display`
+- Only dependencies: `misc` (utilities)
+- **Verified In**: Import statements in `user/`, `project/`, `application/`, `enquiry/` packages
+
+**Control Layer Responsibilities**:
+
+- `userctrl/`: State transitions, eligibility validation, business rules
+- `databasemgr/`: Role-based filtering (`CheckType.isHDBManager()`, `CheckType.isHDBOfficer()`)
+- **Example**: `ProjectDatabaseMgr.getData()` returns all projects for managers, only visible non-prohibited for officers
+
+**Boundary Layer Restrictions**:
+
+- No business logic in views
+- All calculations delegated to Control layer
+- **Example**: `ApplicantInterface.applyForProject()` calls `ApplicantMgr.applyForProject()` for validation
+
+</details>
+
+---
+
+## 💾 Two-Pass Hydration Model
+
+### ⚙️ The Problem
+
+CSV stores object references as string IDs. Naive loading would require:
+
+1. Load all entities
+2. For each reference field, perform O(n) lookup
+3. Risk of forward references (child loaded before parent)
+
+### 💡 The Solution: Phased Loading
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ PHASE 1: ENTITY HYDRATION (Basic Attributes Only)            │
+├──────────────────────────────────────────────────────────────┤
+│ Users → Projects → Applications → Enquiries                  │
+│                                                              │
+│ • All entities loaded with primitive fields                  │
+│ • Reference fields remain null                               │
+│ • O(1) ID → Object map construction                          │
+└──────────────────────────────────────────────────────────────┘
+                           ↓
+┌──────────────────────────────────────────────────────────────┐
+│ PHASE 2: REFERENCE RESOLUTION (Graph Construction)           │
+├──────────────────────────────────────────────────────────────┤
+│ Applicant Updates → Officer Updates                          │
+│                                                              │
+│ • Re-parse files for reference columns only                  │
+│ • Resolve IDs via database managers                          │
+│ • Build bidirectional navigation                             │
+└──────────────────────────────────────────────────────────────┘
+```
+
+> **Enforced By**: `BTOManagementSystem.loadData()` execution order
+
+<details>
+<summary><h3 style='display:inline-block'>⚙️ Phase 1: Entity Hydration Details</h3></summary>
+
+#### Step 1: Load Users
+
+```
+ApplicantReader.read() → List<Applicant>
+HDBOfficerReader.read() → List<HDBOfficer>
+HDBManagerReader.read() → List<HDBManager>
+Add all to userDatabase
+```
+
+#### Step 2: Load Projects
+
+```
+ProjectReader.read(userDatabase) → List<Project>
+```
+- Resolves manager/officers via `userMgr.getUser(userDatabase, ID)`
+- Skips project if manager null
+
+#### Step 3: Load Applications
+
+```
+ApplicationReader.read(userDatabase, projectDatabase) → List<Application>
+```
+- Resolves user and project by ID
+- Skips if either null
+
+#### Step 4: Load Enquiries
+
+```
+EnquiryReader.read(userDatabase, projectDatabase) → List<Enquiry>
+```
+
+- Resolves filer and project by ID
+- Skips if either null
+
+</details>
+
+<details>
+<summary ><h3 style='display:inline-block'>🧩 Phase 2: Reference Resolution Details</h3></summary>
+
+#### Step 5: Applicant Reference Updates
+
+```java
+ApplicantReader.updateApplicants(userDatabase, applicationDatabase, projectDatabase)
+```
+
+- Re-reads `ApplicantFile.txt` line by line
+- Resolves:
+  - `appliedProject` via `projMgr.getData(projectDatabase, projectID)`
+  - `projectApplication` via `appMgr.getData(applicationDatabase, applicationID)`
+  - `withdrawalApplication` via `appMgr.getData(applicationDatabase, applicationID)`
+- Sets references even if null (prints error to stderr)
+
+#### Step 6: Officer Reference Updates
+
+```java
+HDBOfficerReader.updateHDBOfficers(userDatabase, applicationDatabase, projectDatabase)
+```
+
+- Re-reads `HDBOfficerFile.txt` line by line
+- Resolves semicolon-separated ID lists:
+  - `joinedProjects` (List<Project>)
+  - `registeredProjects` (List<Project>)
+  - `projectRegistrations` (List<Application>)
+- Builds `prohibitedProjects` = joinedProjects + registeredProjects
+
+</details>
+
+---
+
+## 🔄 State Machines
+
+### 1. Application Finite State Machine
+
+**Status Enum**: `PENDING`, `SUCCESSFUL`, `UNSUCCESSFUL`, `BOOKED`, `WITHDRAWN`
+
+<details>
+<summary><h4 style='display:inline'>Transition Rules by Application Type</h4></summary>
+
+#### 1. BTO Application
+
+| From | To | Guard | Enforced By |
+| :- | :- | :- | :- |
+| `PENDING` | `SUCCESSFUL` | None | `BTOApplication.updateStatus()` |
+| `PENDING` | `UNSUCCESSFUL` | None | `BTOApplication.updateStatus()` |
+| `PENDING` | `BOOKED` | None | `BTOApplication.updateStatus()` |
+| `PENDING` | `WITHDRAWN` | None | `BTOApplication.updateStatus()` |
+
+<br>
+
+#### 2. Project Registration
+
+| From | To | Guard | Enforced By |
+| :- | :- | :- | :- |
+| `PENDING` | `SUCCESSFUL` | None | `ProjectRegistration.updateStatus()` |
+| `PENDING` | `UNSUCCESSFUL` | None | `ProjectRegistration.updateStatus()` |
+| `PENDING` | `WITHDRAWN` | None | `ProjectRegistration.updateStatus()` |
+| `*` | `BOOKED` | **Rejected** | Returns false |
+
+<br>
+
+#### 3. Withdrawal Application
+
+| From | To | Guard | Enforced By |
+| :- | :- | :- | :- |
+| `PENDING` | `SUCCESSFUL` | None | `WithdrawalApplication.updateStatus()` |
+| `PENDING` | `UNSUCCESSFUL` | None | `WithdrawalApplication.updateStatus()` |
+| `*` | `BOOKED` | **Rejected** | Returns false |
+| `*` | `WITHDRAWN` | **Rejected** | Returns false |
+
+</details>
+<br>
+
+### 2. Applicant State Machine
+
+**State Representation**:
+
+```java
+boolean canApply, isWithdrawing, isReceiptReady;
+Project appliedProject;
+Application projectApplication, withdrawalApplication;
+```
+
+<details>
+<summary><h4 style='display:inline'>Transition Rules</h4></summary>
+<br>
+
+**Initial State**: `canApply=true`, all others false/null
+
+**Key Transitions:**
+
+| Trigger | State Changes | Enforced By |
+| :- | :- | :- |
+| Apply for project | `canApply: true→false`<br>`isWithdrawing: *→false` | `Applicant.setAppliedProject()` |
+| Submit withdrawal | `isWithdrawing: false→true` | `Applicant.setWithdrawalApplication()` |
+| Withdrawal successful | `appliedProject: Project→null`<br>`canApply: false→true`<br>`isWithdrawing: true→false` | `UserMgr.updateStatus()` |
+| BTO booked | `canApply: *→false`<br>`isReceiptReady: false→true` | `UserMgr.updateStatus()` |
+
+**Invalid States Prevented**:
+
+- `appliedProject != null` AND `canApply == true`
+- `projectApplication != null` AND `canApply == true`
+- `withdrawalApplication != null` AND `isWithdrawing == false`
+
+</details>
+<br>
+
+### 3. HDB Officer State Machine
+
+**Additional State**: Lists of `joinedProjects`, `registeredProjects`, `prohibitedProjects`, `projectRegistration`
+
+<details>
+<summary><h4 style='display:inline'>Transition Rules</h4></summary>
+<br>
+
+**Key Transitions**:
+
+| Trigger | State Changes | Enforced By |
+| :- | :- | :- |
+| Register for project | Add to `registeredProjects`, `prohibitedProjects`, `projectRegistration` | `HDBOfficerMgr.registerForProject()` |
+| Registration approved | Move from `registeredProjects` to `joinedProjects`<br>Add to `project.officers` | `UserMgr.updateStatus()` |
+
+**Registration Eligibility**:
+
+- Cannot register if new project's dates overlap with any joined project
+- **Check**: `!(registeredProject.applicationStartDate < newProject.applicationStartDate AND registeredProject.applicationEndDate < newProject.applicationEndDate)`
+- **Enforced By**: `HDBOfficerMgr.checkJoinEligibility()`
+
+**Invariant**: `prohibitedProjects` = `joinedProjects` ∪ `registeredProjects` (maintained during load only)
+
+</details>
 <br>
 
 ---
 
-## Core Features
+## 👥 Authority Model
 
-The system is built around three main user roles, each with a distinct set of capabilities:
+### 👤 Role Hierarchy
 
-#### **Applicant**
-* **View & Filter Projects**: Browse BTO projects open to their user group (e.g., based on marital status and age).
-* **Apply for BTO**: Submit an application for an eligible project.
-* **Manage Applications**: View application status and request withdrawal.
-* **Manage Enquiries**: Create, view, edit, and delete enquiries for projects.
+```
+User
+├── Applicant
+│   └── HDBOfficer (also implements HDBOfficial)
+└── HDBManager (also implements HDBOfficial)
+```
 
-#### **HDB Officer**
-* *(Inherits all Applicant capabilities)* 
-* **Join Project Teams**: Register to be part of a BTO project's management team.
-* **Manage Enquiries**: View and reply to enquiries for projects they handle.
-* **Flat Selection**: Process successful applications by booking flats for applicants.
-* **Generate Receipts**: Create official receipts for applicants who have successfully booked a flat.
+### 🛡️ Permission Matrix
 
-#### **HDB Manager**
-* **Project Lifecycle Management**: Create, edit, and delete BTO project listings.
-* **Control Project Visibility**: Toggle project visibility for applicants.
-* **Staff Management**: Approve or reject HDB Officer registrations for projects.
-* **Application Oversight**: Approve or reject BTO applications and withdrawal requests.
-* **Report Generation**: Generate filterable reports on applicants and their flat choices.
-* **Global Enquiry View**: View and reply to enquiries across ALL projects.
+| Operation | Applicant | Officer | Manager | Enforcement |
+| :- | :- | :- | :- | :- |
+| View visible projects | ✓ (filtered by age/marital) | ✓ (exclude prohibited) | ✓ (all) | `ProjectDatabaseMgr.getData()` |
+| Apply for project | ✓ (eligibility checked) | ✓ (as Applicant) | ✗ | `ApplicantMgr.applyForProject()` |
+| Register for project | ✗ | ✓ (date overlap checked) | ✗ | `HDBOfficerMgr.registerForProject()` |
+| Book applicant flat | ✗ | ✓ (joined projects only) | ✗ | `HDBOfficerMgr.bookApplicantFlat()` |
+| Create/edit/delete project | ✗ | ✗ | ✓ | `HDBManagerMgr` methods |
+| Update application status | ✗ | ✗ | ✓ | `HDBManagerMgr.updateStatus()` |
+| View all applications | ✗ | ✓ (joined projects) | ✓ (all) | `ApplicationDatabaseMgr.getData()` |
+| View enquiries | ✓ (own) | ✓ (assigned projects) | ✓ (all or assigned) | `EnquiryDatabaseMgr.getData()` |
+| Reply to enquiries | ✗ | ✓ (assigned projects) | ✓ (assigned projects) | `HDBOfficialMgr.replyTo()` |
 
-<br>
+<details>
+<summary><h3 style='display:inline-block'>🔐 Eligibility Constraints</h3></summary>
 
----
+**Age and Marital Status for BTO**:
 
-## Architectural Highlights
+- Age ≥ 35 and single: only 2-Room projects
+- Age ≥ 21 and married: all room types
+- Other combinations: no projects visible
+- **Enforced By**: `ApplicantMgr.getProjects()`, `applyForProject()`
 
-This project was carefully structured with modern software design principles and patterns in mind, emphasizing maintainability, scalability, and separation of concerns.
+**Officer Project Restrictions**:
 
-#### **Layered Architecture**
-The application is designed using a classic multi-layered architecture, which decouples different parts of the system for higher cohesion and lower coupling.
+- Cannot view/register projects in `prohibitedProjects`
+- Cannot register if dates overlap with `joinedProjects`
+- **Enforced By**: `ProjectDatabaseMgr.getData()`, `HDBOfficerMgr.checkJoinEligibility()`
 
-* **Presentation Layer (`userinterface`, `display`)**: Manages all Command-Line Interface (CLI) interactions, user input, and formatted output. It is responsible for *how* data is presented to the user.
-* **Business Logic Layer (`userctrl`, `application`, `project`, `enquiry`)**: Contains the core application logic, business rules, and workflows. This layer orchestrates the operations and enforces system constraints (e.g., checking if an applicant is eligible to apply for a project).
-* **Data Access Layer (`database`, `databasemgr`, `reader`, `writer`)**: Handles all data persistence. It abstracts the data storage mechanism (in this case, text files) from the rest of the application, allowing for easier migration to a database in the future.
-* **Domain Model (`user`, `project`, `application`, `enquiry` classes)**: Represents the core entities of the system, encapsulating both data and behavior.
+**Applicant State Guards**:
 
-This separation ensures that changes in one layer (e.g., switching the UI from CLI to a GUI) have minimal impact on the others.
+- Can apply only if `canApply == true`
+- Can submit withdrawal only if `!isWithdrawing`
+- Can get receipt only if `isReceiptReady`
+- **Enforced By**: `ApplicantInterface` menu logic
 
-#### **SOLID Principles in Practice**
-* **S** - **Single Responsibility Principle (SRP)**: Each class has a focused role. For example, `ProjectReader` is solely responsible for reading project data from a file, while `ProjectDisplayer` is only concerned with formatting project details for the console.
-* **O** - **Open/Closed Principle (OCP)**: The system is open to extension but closed for modification. New application types (e.g., `BTOApplication`, `WithdrawalApplication`) can be added by extending the abstract `Application` class without altering the core logic that processes applications.
-* **L** - **Liskov Substitution Principle (LSP)**: Subclasses are fully substitutable for their base classes. An `HDBOfficer` object can be used wherever an `Applicant` is expected, as it inherits and extends its functionality.
-* **I** - **Interface Segregation Principle (ISP)**: The use of lightweight, role-specific interfaces like `IDatabase<T>`, `IReader<T>`, and `IDisplayer<T>` ensures that classes do not depend on methods they don't use.
-* **D** - **Dependency Inversion Principle (DIP)**: High-level modules depend on abstractions (interfaces) rather than concrete implementations. For instance, UI and control layers interact with the `IDatabase<T>` interface, not the concrete `Database<T>` class, making the storage mechanism swappable.
-
-#### **Design Patterns**
-* **Factory Pattern**: The `ApplicationMgr` and `EnquiryMgr` classes act as factories. They encapsulate the logic for creating different types of `Application` and `Enquiry` objects, centralizing instantiation rules and hiding complexity from the client code.
-* **Template Method Pattern**: The abstract `ItemDisplayer<T>` class defines a template for displaying a list of items (`display(List<T>)`) but allows subclasses (`ProjectDisplayer`, `EnquiryDisplayer`) to define the specific rendering logic for a single item by overriding the abstract `display(T)` method.
-* **Strategy Pattern (Implicit)**: The `ItemDisplayer<T>` hierarchy also functions as a Strategy pattern. The algorithm for displaying items can be changed at runtime by using a different concrete `ItemDisplayer` subclass, effectively changing the display strategy.
-
-<br>
+</details>
 
 ---
 
-## Tech Stack
+## 🛠️ Tech Stack
 
-* **Language**: Java (JDK) 
-* **IDE**: Developed using Eclipse
-<!--* **Version Control**: Git & GitHub -->
-
-<br>
-
----
-
-## Setup and Usage
-
-Follow these steps to get the application running on your local machine.
-
-1.  **Clone the Repository**
-    ```bash
-    git clone [https://github.com/AaronDDavis/BTOManagementSystem.git](https://github.com/AaronDDavis/BTOManagementSystem.git)
-    cd BTOManagementSystem
-    ```
-
-2.  **Compile the Code**
-    Navigate to the `src` directory and compile all Java files.
-    ```bash
-    cd src
-    javac main/BTOManagementSystem.java -d ../bin
-    ```
-    *(Note: This command assumes all source files are correctly placed within their package directories inside `src`)*
-
-3.  **Run the Application**
-    From the `bin` directory, execute the main class.
-    ```bash
-    cd ../bin
-    java main.BTOManagementSystem
-    ```
-
-4.  **Login Credentials**
-    The system is initialized with a list of users from the data files.
-    * **User ID**: NRIC (e.g., S1234567A) 
-    * **Default Password**: `password` 
-
-<br>
+| Component | Technology | Description |
+| :- | :- | :- |
+| **Language** | Java SE | Core application |
+| **Persistence** | BufferedReader/Writer | CSV-based file I/O |
+| **Architecture** | ECB (Entity-Control-Boundary) | Clear layer separation |
+| **Date Handling** | `java.time.LocalDate` | DD-MM-YYYY format |
+| **ID Generation** | `java.util.UUID` | With type-specific prefixes |
 
 ---
 
-## Project Structure
+## 🧱 Design Patterns
 
-The source code is organized into logical packages to maintain a clean and scalable structure:
+| Pattern | Implementation | Provable In |
+| :- | :- | :- |
+| **Factory** | `ApplicationMgr.create()` | Switch on `APPLICATION_TYPE` enum |
+| **Template Method** | `ItemDisplayer<T>` | `display(List<T>)` calls abstract `display(T)` |
+| **Strategy** | `Application.updateStatus()` | Different logic per subclass |
+| **Facade** | `BTOManagementSystem` load/save | Coordinates 6 entity types across phases |
+| **Manager/Controller** | Per-role managers | `ApplicantMgr`, `HDBOfficerMgr`, `HDBManagerMgr` |
+| **Marker Interface** | `HDBOfficial` | Empty interface for type identification |
+| **Repository** | `Database<T>` + managers | Role-based filtered access |
 
-src  
-├── **application/** --- Application classes (BTO, Withdrawal, etc.)  
-├── **database/** ------Generic in-memory database implementation  
-├── **databasemgr/** --Managers for database operations  
-├── **display/** ---------Classes for formatting and displaying items  
-├── **enquiry/** --------Enquiry entity and manager  
-├── **main/** -----------Main application entry point  
-├── **misc/** -----------Utility classes (ID creators, type checkers)  
-├── **project/** ---------Project entity and manager  
-├── **reader/** ----------Classes for reading data from files  
-├── **user/** ------------User entities (Applicant, Officer, Manager)  
-├── **userctrl/** ---------Business logic controllers for each user type  
-├── **userinterface/** ---CLI-based user interfaces for each role  
-└── **writer/** -----------Classes for writing data to files
+---
+
+## 💻 How to Run
+
+### ⚙️ Prerequisites
+
+- Java JDK 8+
+- Create `data/` directory in project root
+
+---
+
+### 🚀 Compilation & Execution
+
+```bash
+javac -d bin src/**/*.java
+java -cp bin main.BTOManagementSystem
+```
+
+---
+
+### 🧩 Test Workflows
+
+**Applicant Flow**:
+
+1. Sign up with valid NRIC (e.g., S1234567A, 9 chars, starts S/T, 7 digits + 1 letter)
+2. Browse projects (filtered by age/marital status)
+3. Apply for eligible project
+4. View application status
+
+**Officer Flow**:
+
+1. Sign up as Officer
+2. Register for projects (date overlap validation)
+3. Book applicant flats for joined projects
+
+**Manager Flow**:
+
+1. Login as Manager
+2. Create project (assign manager/officers)
+3. Update application statuses
+4. Generate reports
+
+---
+
+## 🧾 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+You’re welcome to use, modify, or build upon this project for learning or non-commercial purposes.
+
+---
+
+## 📬 Contact
+
+Developed by **Aaron Davis**
+
+Email: [aaronddavis001@gmail.com]
+
+LinkedIn: [https://linkedin.com/in/aaron-daniel-davis]
